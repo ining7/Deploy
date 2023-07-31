@@ -9,10 +9,9 @@
    - `compressai/models/google.py`
 
    - `compressai/utils/eval_model/__main__.py`
-
 2. 文档
 
    1. `normal.md`
    2. `refactor_module.md`
-
-### 熵编码
+   3. `check_accuracy.md`
+3. 以`ScaleHyperprior`为例，示例在`ScaleHyperprior.py`
