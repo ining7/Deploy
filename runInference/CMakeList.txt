@@ -1,0 +1,8 @@
+add_executable(test 
+               test.cpp
+               yanic.cpp
+               models.cpp
+               )
+target_include_directories(test PRIVATE /onnxruntime/onnxruntime-linux-x64-1.15.1/include ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(test PRIVATE onnxruntime png)
+target_link_directories(test PRIVATE /onnxruntime/onnxruntime-linux-x64-1.15.1/lib)

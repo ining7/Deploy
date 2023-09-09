@@ -32,7 +32,7 @@
 
 3. 在这个示例中`h_a`的精度存在问题，但是`g_s`并没有![image-20230731113929015](./assets/image-20230731113929015.png)
 
-   ​    这个精度的损失是无法接受的，我可以通过查找发现z_hat进行的不只是round的量化，而是一个包含means的操作：
+   ​    这个精度的损失是无法接受的，我们可以通过查找发现z_hat进行的不只是round的量化，而是一个包含means的操作：
 
    ```python
    # entropy_models/entropy_models.py/EntropyBottleneck/forward
