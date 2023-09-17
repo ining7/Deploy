@@ -120,17 +120,23 @@ class ScaleHyperprior(CompressionModel):
         self.N = int(N)
         self.M = int(M)
 
-    def _convert(self, model, model_name, input_names, input_shapes, output_names, output_path):
+    def _convert(self, model, model_name, input_names_list, input_shapes_list, output_names_list, output_path):
         print(f"converting: {model_name}")
-        dummy_inputs = torch.randn((1, *input_shapes))
+        dummy_inputs = [torch.randn((1, *input_shapes)) for input_shapes in input_shapes_list]
         model_path = os.path.join(output_path, f"{model_name}.onnx")
         print(model_path)
-        dynamic_axes = {name: {0: "batch", 2: "height", 3: "width"} for name in input_names}
-        dynamic_axes.update({name: {0: "batch", 1: "height", 2: "width"} for name in output_names})
+        dynamic_axes = {}
+        for input_name, input_shape in zip(input_names_list, input_shapes_list):
+            if len(input_shape) == 3:
+                dynamic_axes[input_name] = {0: "batch", 2: "height", 3: "width"}
+            else: # Handle other formats as needed
+                dynamic_axes[input_name] = {0: "batch"}
+        for output_name in output_names_list:
+            dynamic_axes[output_name] = {0: "batch", 2: "height", 3: "width"}
         torch.onnx.export(
-            model=model, args=tuple(dummy_inputs), f=model_path,
-            input_names=input_names, dynamic_axes=dynamic_axes,
-            output_names=output_names, opset_version=11)
+            model=model, args=tuple(*dummy_inputs,), f=model_path,
+            input_names=input_names_list, dynamic_axes=dynamic_axes,
+            output_names=output_names_list, opset_version=11)
         print(' -------------------------------- ')
 
     def _convert_y_encoder(self, model_name, input_shapes, output_path):
@@ -139,12 +145,12 @@ class ScaleHyperprior(CompressionModel):
                 super(Encoder, self).__init__()
                 self.g_a = g_a
 
-            def forward(self, y):
-                y = self.g_a(y)
-                return torch.round(y)
+            def forward(self, x):
+                y = self.g_a(x)
+                return y, torch.round(y)
 
         new_mode = Encoder(self.g_a)
-        self._convert(new_mode, model_name, ['x_input'], input_shapes, ['y_output'], output_path)
+        self._convert(new_mode, model_name, ['x_input'], [input_shapes], ['y', 'y_hat'], output_path)
 
     def _convert_z_encoder(self, model_name, input_shapes, output_path):
         class Encoder(nn.Module):
@@ -156,13 +162,13 @@ class ScaleHyperprior(CompressionModel):
                 state_dict = torch.hub.load_state_dict_from_url(model_url)
                 self.quantiles = state_dict['entropy_bottleneck.quantiles']
 
-            def forward(self, z):
-                z = self.h_a(z)
+            def forward(self, y):
+                y = torch.abs(y)
+                z = self.h_a(y)
                 z_hat = self.dequantize(z, self._get_medians())
-                return z_hat
+                return z, z_hat
             
             def dequantize(self, inputs, means):
-                mode = "dequantize"
                 outputs = inputs.clone()
                 if means is not None:
                     outputs -= means
@@ -176,30 +182,32 @@ class ScaleHyperprior(CompressionModel):
                 return medians
 
         new_mode = Encoder(self.h_a)
-        self._convert(new_mode, model_name, ['y_input'], input_shapes, ['z_hat_output'], output_path)
+        self._convert(new_mode, model_name, ['y_input'], [input_shapes], ['z', 'z_hat'], output_path)
 
-    def _check_onnx_model_accuracy(self, model_name, input_name, input_data, output_data, check_path, onnx_path):
+    def _check_onnx_model_accuracy(self, model_name, input_names_list, input_data_list, output_names_list, output_data_list, check_path, onnx_path):
         print(f"checking: {model_name}")
         if not os.path.exists(check_path):
             os.makedirs(check_path)
-        input_check_path = os.path.join(check_path, f'{model_name}_input.pt')
-        output_check_path = os.path.join(check_path, f'{model_name}_output.pt')
         onnx_path = os.path.join(onnx_path, f'{model_name}.onnx')
 
-        torch.save(input_data, input_check_path) 
-        torch.save(output_data, output_check_path) 
-
         sess = onnxruntime.InferenceSession(onnx_path, providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-        input_onnx = input_data.numpy()
-        output_onnx = sess.run(None, {input_name: input_onnx})[0]
+        input_dict = {name: data.numpy() for name, data in zip(input_names_list, input_data_list)}
+        output_onnx_list = sess.run(None, input_dict)
 
-        # print("output_data", output_data)
-        # print("output_onnx", output_onnx)
+        for input_name, input_data in zip(input_names_list, input_data_list):
+            input_check_path = os.path.join(check_path, f'{model_name}_input_{input_name}.pt')
+            torch.save(input_data, input_check_path)
 
-        diff = np.abs(output_data.numpy() - output_onnx)
-        print(f' == Mean difference: {np.mean(diff)}')
-        print(f' == Max difference: {np.max(diff)}')
+        for output_name, output_data in zip(output_names_list, output_data_list):
+            output_check_path = os.path.join(check_path, f'{model_name}_output_{output_name}.pt')
+            torch.save(output_data, output_check_path)
+
+        for output_name, output_data, output_onnx in zip(output_names_list, output_data_list, output_onnx_list):
+            diff = np.abs(output_data.numpy() - output_onnx)
+            print(f'Output {output_name} == Mean difference: {np.mean(diff)}')
+            print(f'Output {output_name} == Max difference: {np.max(diff)}')
         print(' -------------------------------- ')
+
 
     @property
     def downsampling_factor(self) -> int:
@@ -212,25 +220,22 @@ class ScaleHyperprior(CompressionModel):
         z_hat, z_likelihoods = self.entropy_bottleneck(z)
         scales_hat = self.h_s(z_hat)
         y_hat, y_likelihoods = self.gaussian_conditional(y, scales_hat)
-        # torch.save(y_hat, output_check_path) #
         x_hat = self.g_s(y_hat)
 
         onnx_path = 'D:\_AIR\compressai\onnx'
         check_path = 'D:\_AIR\compressai\check'
-        # g_a: x -> y -> y_hat
-        # self._convert(self.g_a, "g_a", ['x_input'], x.shape, ['y_output'], onnx_path)
-        # self._convert_y_encoder("g_a", x.shape, onnx_path); 
-        self._check_onnx_model_accuracy('g_a', 'x_input', x, y_hat, check_path, onnx_path)
-        # h_a: abs(y) -> z -> z_hat
-        # self._convert(self.h_a, "h_a", ['y_input'], torch.abs(y).shape, ['z_output'], onnx_path)
-        # self._convert_z_encoder("h_a", torch.abs(y).shape, onnx_path)
-        self._check_onnx_model_accuracy('h_a', 'y_input', torch.abs(y), z_hat, check_path, onnx_path)
-        # h_s: z_hat -> scales_hat 
-        # self._convert(self.h_s, "h_s", ['z_hat_input'], z_hat.shape, ['scales_hat_output'], onnx_path) 
-        self._check_onnx_model_accuracy('h_s', 'z_hat_input', z_hat, scales_hat, check_path, onnx_path)
-        # g_s: y_hat -> x_hat
-        # self._convert(self.g_s, "g_s", ['y_hat_input'], y_hat.shape, ['x_hat_output'], onnx_path)
-        self._check_onnx_model_accuracy('g_s', 'y_hat_input', y_hat, x_hat, check_path, onnx_path) 
+        # g_a: [x] -> [y, y_hat]
+        self._convert_y_encoder("g_a", x.shape, onnx_path); 
+        self._check_onnx_model_accuracy('g_a', ['x_input'], [x], ['y', 'y_hat'], [y, y_hat], check_path, onnx_path)
+        # h_a: [y] -> abs(y) -> [z, z_hat]
+        self._convert_z_encoder("h_a", y.shape, onnx_path)
+        self._check_onnx_model_accuracy('h_a', ['y_input'], [y], ['z', 'z_hat'], [z, z_hat], check_path, onnx_path)
+        # h_s: [z_hat] -> [scales_hat] 
+        self._convert(self.h_s, "h_s", ['z_hat'], [z_hat.shape], ['scales_hat'], onnx_path) 
+        self._check_onnx_model_accuracy('h_s', ['z_hat'], [z_hat], ['scales_hat'], [scales_hat], check_path, onnx_path)
+        # g_s: [y_hat] -> [x_hat]
+        self._convert(self.g_s, "g_s", ['y_hat'], [y_hat.shape], ['x_hat'], onnx_path)
+        self._check_onnx_model_accuracy('g_s', ['y_hat'], [y_hat], ['x_hat'], [x_hat], check_path, onnx_path) 
 
         return {
             "x_hat": x_hat,
@@ -266,4 +271,3 @@ class ScaleHyperprior(CompressionModel):
         y_hat = self.gaussian_conditional.decompress(strings[0], indexes, z_hat.dtype)
         x_hat = self.g_s(y_hat).clamp_(0, 1)
         return {"x_hat": x_hat}
-
