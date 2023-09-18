@@ -150,7 +150,7 @@ class ScaleHyperprior(CompressionModel):
                 return y, torch.round(y)
 
         new_mode = Encoder(self.g_a)
-        self._convert(new_mode, model_name, ['x_input'], [input_shapes], ['y', 'y_hat'], output_path)
+        self._convert(new_mode, model_name, ['x'], [input_shapes], ['y', 'y_hat'], output_path)
 
     def _convert_z_encoder(self, model_name, input_shapes, output_path):
         class Encoder(nn.Module):
@@ -182,7 +182,7 @@ class ScaleHyperprior(CompressionModel):
                 return medians
 
         new_mode = Encoder(self.h_a)
-        self._convert(new_mode, model_name, ['y_input'], [input_shapes], ['z', 'z_hat'], output_path)
+        self._convert(new_mode, model_name, ['y'], [input_shapes], ['z', 'z_hat'], output_path)
 
     def _check_onnx_model_accuracy(self, model_name, input_names_list, input_data_list, output_names_list, output_data_list, check_path, onnx_path):
         print(f"checking: {model_name}")
@@ -226,10 +226,10 @@ class ScaleHyperprior(CompressionModel):
         check_path = 'D:\_AIR\compressai\check'
         # g_a: [x] -> [y, y_hat]
         self._convert_y_encoder("g_a", x.shape, onnx_path); 
-        self._check_onnx_model_accuracy('g_a', ['x_input'], [x], ['y', 'y_hat'], [y, y_hat], check_path, onnx_path)
+        self._check_onnx_model_accuracy('g_a', ['x'], [x], ['y', 'y_hat'], [y, y_hat], check_path, onnx_path)
         # h_a: [y] -> abs(y) -> [z, z_hat]
         self._convert_z_encoder("h_a", y.shape, onnx_path)
-        self._check_onnx_model_accuracy('h_a', ['y_input'], [y], ['z', 'z_hat'], [z, z_hat], check_path, onnx_path)
+        self._check_onnx_model_accuracy('h_a', ['y'], [y], ['z', 'z_hat'], [z, z_hat], check_path, onnx_path)
         # h_s: [z_hat] -> [scales_hat] 
         self._convert(self.h_s, "h_s", ['z_hat'], [z_hat.shape], ['scales_hat'], onnx_path) 
         self._check_onnx_model_accuracy('h_s', ['z_hat'], [z_hat], ['scales_hat'], [scales_hat], check_path, onnx_path)
